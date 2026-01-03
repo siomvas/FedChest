@@ -1,0 +1,6 @@
+*.csv
+*.png
+*.jpg
+data/
+__pycache__/
+.DS_Store

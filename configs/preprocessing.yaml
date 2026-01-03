@@ -1,0 +1,96 @@
+# FedChest Preprocessing Configuration
+# All preprocessing parameters in one place for reproducibility
+# See docs/PREPROCESSING.md for detailed explanations
+
+image:
+  size: 224
+  crop_border_percent: 0.05
+
+clahe:
+  clip_limit: 2.0
+  tile_grid_size: [8, 8]
+
+# Common disease labels across all datasets
+# Order matters - this defines label vector indexing
+common_diseases:
+  - Atelectasis
+  - Cardiomegaly
+  - Consolidation
+  - Edema
+  - Effusion
+  - Lung Lesion
+  - Lung Opacity
+  - No Finding
+  - Pneumonia
+  - Pneumothorax
+
+cxr14:
+  # Labels come as pipe-separated string, need get_dummies()
+  label_separator: "|"
+  label_aliases:
+    Lung Lesion:
+      - Mass
+      - Nodule
+    Lung Opacity:
+      - Infiltration
+      - Fibrosis
+
+chexpert:
+  # Labels have uncertainty (-1), treat as negative (0) per original paper
+  uncertainty_policy: zero
+  # Age-based split threshold (median age)
+  age_split_threshold: 63
+    
+padchest:
+  label_aliases:
+    Atelectasis:
+      - atelectasis
+      - atelectasis basal
+      - laminar atelectasis
+      - total atelectasis
+      - lobar atelectasis
+      - round atelectasis
+      - segmental atelectasis
+    Cardiomegaly:
+      - cardiomegaly
+      - enlarged cardiac silhouette
+    Consolidation:
+      - consolidation
+    Edema:
+      - pulmonary edema
+      - kerley lines
+    Effusion:
+      - pleural effusion
+      - loculated fissural effusion
+      - pericardial effusion
+      - loculated pleural effusion
+      - hydropneumothorax
+      - empyema
+    Lung Lesion:
+      - lung metastasis
+      - pulmonary mass
+      - nodule
+      - granuloma
+      - multiple nodules
+      - lepidic adenocarcinoma
+    Lung Opacity:
+      - infiltrates
+      - alveolar pattern
+      - increased density
+      - miliary opacities
+      - interstitial pattern
+      - reticular pattern
+      - reticular interstitial pattern
+      - reticulonodular interstitial pattern
+      - pulmonary fibrosis
+      - ground glass pattern
+      - fibrotic band
+    Pneumonia:
+      - pneumonia
+      - atypical pneumonia
+    Pneumothorax:
+      - pneumothorax
+      - hydropneumothorax
+
+    No Finding:
+      - normal

@@ -1,0 +1,93 @@
+# FedChest Data Splits Configuration
+# Centralizes all random seeds and split parameters for reproducibility
+
+random_seed: 42
+
+common_diseases:
+  - Atelectasis
+  - Cardiomegaly
+  - Consolidation
+  - Edema
+  - Effusion
+  - Lung Lesion
+  - No Finding
+  - Pneumonia
+  - Pneumothorax
+
+# Split ratios (approximate, actual splits are patient-level)
+split_ratios:
+  # Target sizes in thousands of images
+  test_size_k: 10
+  val_size_k: 15
+  # Remainder goes to training
+
+# Patient-level splitting ensures no data leakage
+# All images from a patient go to the same split
+patient_level_split: true
+
+# Per-dataset split parameters
+# These are derived values to achieve target sizes given patient distributions
+datasets:
+  cxr14:
+    # Number of patients to allocate to test set to get ~10k images
+    test_patients: 5711
+    # Number of patients to allocate to val set to get ~15k images  
+    val_patients: 8470
+    # Expected final counts (for validation)
+    expected_counts:
+      train: 23702
+      val: 15000
+      test: 10000
+
+  chexpert:
+    # CheXpert is split into two age-based clients
+    # Test set drawn before age split
+    test_patients: 7356
+    
+    # After test removal, split by age into young/old clients
+    young:
+      val_patients: 7489
+      expected_counts:
+        train: 31092
+        val: 15000
+        test: 7797  # Subset of original test where age < 63
+    
+    old:
+      val_patients: 7264
+      expected_counts:
+        train: 29703
+        val: 15000
+        test: 7203  # Subset of original test where age >= 63
+
+  padchest:
+    test_patients: 8471
+    val_patients: 12920
+    expected_counts:
+      train: 26007
+      val: 15000
+      test: 10000
+
+# Federated client definitions
+clients:
+  - id: cxr14
+    name: "NIH ChestX-ray14"
+    source_dataset: cxr14
+    
+  - id: cxp_young
+    name: "CheXpert (Age < 63)"
+    source_dataset: chexpert
+    subset: young
+    
+  - id: cxp_old
+    name: "CheXpert (Age >= 63)"
+    source_dataset: chexpert
+    subset: old
+    
+  - id: padchest
+    name: "PadChest"
+    source_dataset: padchest
+
+# Centralized training/evaluation includes ALL clients
+centralized:
+  training_clients: [cxr14, cxp_young, cxp_old, padchest]
+  test_clients: [cxr14, cxp_young, cxp_old, padchest]

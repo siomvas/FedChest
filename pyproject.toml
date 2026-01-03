@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fedchest"
+version = "1.0.0"
+description = "FedChest: A Federated Learning Benchmark for Multi-Label Chest X-Ray Classification"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Vasilis Siomos", email = "user@example.org"},
+]
+keywords = [
+    "federated-learning",
+    "chest-x-ray",
+    "medical-imaging",
+    "multi-label-classification",
+    "benchmark-dataset",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+dependencies = [
+    "numpy>=1.21.0",
+    "pandas>=1.3.0",
+    "Pillow>=8.0.0",
+    "opencv-python>=4.5.0",
+    "albumentations>=1.0.0",
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+    "scikit-learn>=0.24.0",
+    "tqdm>=4.60.0",
+    "PyYAML>=5.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0.0",
+    "pytest-cov>=2.0.0",
+    "black>=22.0.0",
+    "isort>=5.0.0",
+    "flake8>=4.0.0",
+    "mypy>=0.900",
+]
+notebooks = [
+    "jupyter>=1.0.0",
+    "matplotlib>=3.4.0",
+    "seaborn>=0.11.0",
+]
+training = [
+    "monai>=0.8.0",
+    "nvflare>=2.0.0",
+]
+all = ["fedchest[dev,notebooks,training]"]
+
+[project.urls]
+Homepage = "https://github.com/siomvas/FedChest"
+Documentation = "https://github.com/siomvas/FedChest#readme"
+Repository = "https://github.com/siomvas/FedChest"
+Issues = "https://github.com/siomvas/FedChest/issues"
+
+[project.scripts]
+fedchest-preprocess = "fedchest.scripts.preprocess:main"
+fedchest-validate = "fedchest.scripts.validate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fedchest = ["configs/*.yaml"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.mypy_cache
+    | \.pytest_cache
+    | \.venv
+    | build
+    | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["fedchest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=fedchest --cov-report=term-missing"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
