@@ -23,23 +23,6 @@ common_diseases:
   - No Finding
   - Pneumonia
   - Pneumothorax
-
-cxr14:
-  # Labels come as pipe-separated string, need get_dummies()
-  label_separator: "|"
-  label_aliases:
-    Lung Lesion:
-      - Mass
-      - Nodule
-    Lung Opacity:
-      - Infiltration
-      - Fibrosis
-
-chexpert:
-  # Labels have uncertainty (-1), treat as negative (0) per original paper
-  uncertainty_policy: zero
-  # Age-based split threshold (median age)
-  age_split_threshold: 63
     
 padchest:
   label_aliases:
@@ -53,7 +36,6 @@ padchest:
       - segmental atelectasis
     Cardiomegaly:
       - cardiomegaly
-      - enlarged cardiac silhouette
     Consolidation:
       - consolidation
     Edema:
@@ -79,7 +61,6 @@ padchest:
       - increased density
       - miliary opacities
       - interstitial pattern
-      - reticular pattern
       - reticular interstitial pattern
       - reticulonodular interstitial pattern
       - pulmonary fibrosis

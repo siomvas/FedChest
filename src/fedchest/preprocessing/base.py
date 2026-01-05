@@ -82,25 +82,12 @@ class BasePreprocessor(ABC):
             raise KeyError("common_diseases not defined in config")
     
     @abstractmethod
-    def load_metadata(self) -> pd.DataFrame:
+    def load_and_clean_metadata(self) -> pd.DataFrame:
         """
         Load and parse dataset metadata/labels.
         
         Returns:
             DataFrame with columns: Path, Patient ID, [disease columns]
-        """
-        pass
-    
-    @abstractmethod
-    def get_source_image_path(self, row: pd.Series) -> Path:
-        """
-        Get the source image path for a row in the metadata.
-        
-        Args:
-            row: Row from metadata DataFrame
-        
-        Returns:
-            Full path to source image
         """
         pass
     
@@ -119,8 +106,8 @@ class BasePreprocessor(ABC):
         # Check which common diseases are present as columns
         available_diseases = [d for d in self.common_diseases if d in df.columns]
         
-        if not len(available_diseases) == 9:
-            raise ValueError(f"common disease columns incorrent. Available: {df.columns.tolist()}")
+        if not len(available_diseases) == 10:
+            raise ValueError(f"common disease columns incorrent. Available: {available_diseases}")
         
         # Keep rows where at least one common disease is present
         mask = (df[available_diseases] != 0).any(axis=1)

@@ -21,6 +21,9 @@ Known corrupted images that must be skipped:
 """
 
 import logging
+import shutil
+import ast
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Optional, Set
 
@@ -45,12 +48,6 @@ CORRUPTED_IMAGES: Set[str] = {
     "216840111366964012819207061112010306085429121_04-020-102.png",
     "216840111366964012819207061112010307142602253_04-014-084.png",
 }
-
-# Label aliases - multiple terms map to the same common disease
-# load from configs/preprocessing.yaml
-with open(Path(__file__).parent.parent.parent / "configs" / "preprocessing.yaml", "r") as f:
-    PREPROCESSING_CONFIGS = yaml.safe_load(f)
-LABEL_ALIASES = PREPROCESSING_CONFIGS["padchest"]["label_aliases"]
 
 
 class PadChestPreprocessor(BasePreprocessor):
@@ -83,6 +80,22 @@ class PadChestPreprocessor(BasePreprocessor):
             alt_file = self.source_dir / "padchest_labels.csv"
             if alt_file.exists():
                 self.metadata_file = alt_file
+        
+        self.interim_dir = self.output_dir / "interim_splits"
+        self.interim_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _load_label_map(self) -> dict:
+        """Load label mapping from config."""
+        alias_config = self.config["padchest"]["label_aliases"]
+        if not alias_config:
+            raise ValueError("No label aliases found in config for PadChest.")
+        
+        source_to_target = defaultdict(list)
+        for target, sources in alias_config.items():
+            for source in sources:
+                source_to_target[source.lower().strip()].append(target)
+
+        return source_to_target
     
     def _parse_label_string(self, label_str: str) -> List[str]:
         """
@@ -96,14 +109,17 @@ class PadChestPreprocessor(BasePreprocessor):
         Returns:
             List of label strings (lowercase, stripped)
         """
-        if pd.isna(label_str):
+        if pd.isna(label_str) or label_str.strip() == "":
             return []
         
-        # Remove brackets and quotes, split by comma
-        cleaned = label_str.replace("[", "").replace("]", "").replace("'", "")
-        labels = [l.strip().lower() for l in cleaned.split(",")]
-        
-        return [l for l in labels if l]  # Remove empty strings
+        try: 
+            parsed = ast.literal_eval(label_str)
+            if isinstance(parsed, list):
+                return [l.lower().strip() for l in parsed]
+            return []
+        except (ValueError, SyntaxError):
+            logger.warning(f"Failed to parse label string: {label_str}")
+            return []
     
     def _map_to_common_disease(self, labels: List[str]) -> dict:
         """
@@ -137,9 +153,9 @@ class PadChestPreprocessor(BasePreprocessor):
         print(f"Mapping labels {labels} to changes: {changes}")
         return result
     
-    def load_metadata(self) -> pd.DataFrame:
+    def load_and_clean_metadata(self) -> pd.DataFrame:
         """
-        Load and parse PadChest metadata.
+        Load, parse, clean, apply mappings, and filter PadChest metadata.
         
         Returns:
             DataFrame with standardized columns
@@ -151,6 +167,11 @@ class PadChestPreprocessor(BasePreprocessor):
             self.metadata_file,
             usecols=["ImageID", "PatientID", "Projection", "Labels"],
         )
+        df.rename(columns={
+            "ImageID": "Path",
+            "PatientID": "Patient ID",
+            "Labels": "RawLabels"
+        }, inplace=True)
         
         logger.info(f"Loaded {len(df)} rows")
         
@@ -159,46 +180,72 @@ class PadChestPreprocessor(BasePreprocessor):
         df = df[df["Projection"].isin(valid_projections)].copy()
         logger.info(f"After filtering projections: {len(df)} rows")
         
+        # Remove known corrupted images
+        corrupted_count = df["Path"].isin(CORRUPTED_IMAGES).sum()
+        if corrupted_count > 0:
+            logger.info(f"Removing {corrupted_count} known corrupted images")
+            df = df[~df["Path"].isin(CORRUPTED_IMAGES)]
+
         # Remove rows with NA labels
-        na_count = df["Labels"].isna().sum()
+        na_count = df["RawLabels"].isna().sum()
         if na_count > 0:
             logger.info(f"Removing {na_count} rows with NA labels")
-            df = df.dropna(subset=["Labels"])
+            df = df.dropna(subset=["RawLabels"])
         
         # Parse labels and create disease columns
+        source_to_target = self._load_label_map()
+
         logger.info("Parsing labels...")
-        disease_data = []
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Parsing labels"):
-            raw_labels = self._parse_label_string(row["Labels"])
-            disease_dict = self._map_to_common_disease(raw_labels)
-            disease_data.append(disease_dict)
+        df["LabelList"] = df["RawLabels"].apply(self._parse_label_string)
+
+        for disease in self.common_diseases:
+            df[disease] = 0.0
+
+        audit_log = defaultdict(set)
+
+        disease_index = {disease: idx for idx, disease in enumerate(self.common_diseases)}
+
+        n_rows = len(df)
+        n_classes = len(self.common_diseases)
+        label_matrix = np.zeros((n_rows, n_classes), dtype=np.float32)
+
+        for i, labels in enumerate(tqdm(df["LabelList"], total=n_rows, desc="Mapping labels")):
+            for source_label in labels:
+                if source_label in source_to_target:
+                    target_labels = source_to_target[source_label]
+
+                    # log for supervision, track *unique* mappings
+                    audit_log[source_label].update(target_labels)
+
+                    for target_label in target_labels:
+                        if target_label in disease_index:
+                            label_idx = disease_index[target_label]
+                            label_matrix[i, label_idx] = 1.0
+    
+        # Assign back to dataframe
+        for name, idx in disease_index.items():
+            df[name] = label_matrix[:, idx]
         
-        disease_df = pd.DataFrame(disease_data)
-        df = pd.concat([df.reset_index(drop=True), disease_df], axis=1)
-        df.drop(columns=["Labels"], inplace=True)
+        logger.info("=" * 40)
+        logger.info("MAPPING AUDIT LOG (Unique Mappings Applied)")
+        logger.info("=" * 40)
+        for source, mapped_targets in sorted(audit_log.items()):
+            logger.info(f"Source: '{source}' -> Mapped to: {sorted(list(mapped_targets))}")
+        
+        # Also verify the counts match (number of mappings applied matches the config)
+        total_mappings = sum(len(v) for v in audit_log.values())
+        logger.info(f"Total unique source labels mapped: {len(audit_log)}, vs the config mappings: {len(source_to_target)}")
+
+        logger.info("=" * 40)
+        
+        df.drop(columns=["RawLabels"], inplace=True)
         
         # Filter to common diseases (keep only rows with at least one)
         df = self.filter_common_diseases(df)
         
-        # Remove known corrupted images
-        corrupted_count = df["ImageID"].isin(CORRUPTED_IMAGES).sum()
-        if corrupted_count > 0:
-            logger.info(f"Removing {corrupted_count} known corrupted images")
-            df = df[~df["ImageID"].isin(CORRUPTED_IMAGES)]
-        
         # Remove duplicates
-        dup_subset = ["PatientID", "Projection"] + [self.common_diseases[i] for i in range(len(self.common_diseases)) if self.common_diseases[i] in df.columns]
+        dup_subset = ["Patient ID", "Projection"] + self.common_diseases
         df = self.remove_duplicates(df, dup_subset)
-        
-        # Standardize column names
-        df = df.rename(columns={
-            "ImageID": "Path",
-            "PatientID": "Patient ID",
-        })
-        
-        # Ensure correct column order
-        cols = ["Path", "Patient ID", "Projection"] + self.common_diseases
-        df = df[[c for c in cols if c in df.columns]]
         
         # Validate
         self.validate_labels(df)
@@ -209,79 +256,22 @@ class PadChestPreprocessor(BasePreprocessor):
         
         return df
     
-    def get_source_image_path(self, row: pd.Series) -> Path:
-        """Get path to source image for a row."""
-        return self.images_source_dir / row["Path"]
-    
-    def get_output_image_path(self, row: pd.Series) -> Path:
-        """Get path for processed output image."""
-        return self.images_dir / self.DATASET_NAME / row["Path"]
-    
-    def preprocess_images(self, df: pd.DataFrame) -> pd.DataFrame:
+    def prepare_splits(self, seed: int = 42, test_ratio: float=0.1, val_ratio: float=0.15):
         """
-        Preprocess all images in the dataset.
+        Prepare interim splits without image processing.
+        
+        PadChest has a large number of patients, so we will create splits
+        at the patient level to avoid data leakage.
         
         Args:
-            df: DataFrame with Path column
-        
-        Returns:
-            DataFrame with updated paths (failed images removed)
-        """
-        logger.info(f"Preprocessing {len(df)} images...")
-        
-        # Create output subdirectory
-        output_subdir = self.images_dir / self.DATASET_NAME
-        output_subdir.mkdir(parents=True, exist_ok=True)
-        
-        failed_indices = []
-        
-        for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing images"):
-            source_path = self.get_source_image_path(row)
-            output_path = self.get_output_image_path(row)
-            
-            success = preprocess_chest_xray(
-                image_path=source_path,
-                output_path=output_path,
-                size=self.image_size,
-                crop_percent=self.crop_percent,
-                clip_limit=self.clip_limit,
-                tile_grid_size=self.tile_grid_size,
-            )
-            
-            if not success:
-                failed_indices.append(idx)
-        
-        # Remove failed images
-        if failed_indices:
-            logger.warning(f"Failed to process {len(failed_indices)} images")
-            df = df.drop(index=failed_indices)
-        
-        # Update paths to be relative
-        df["Path"] = df["Path"].apply(lambda p: f"{self.DATASET_NAME}/{p}")
-        
-        logger.info(f"Successfully processed {len(df)} images")
-        return df
-    
-    def create_splits(
-        self,
-        df: pd.DataFrame,
-        seed: int = 42,
-        test_patients: int = 8471,
-        val_patients: int = 12920,
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """
-        Create train/val/test splits at the patient level.
-        
-        Args:
-            df: Full dataset DataFrame
             seed: Random seed for reproducibility
-            test_patients: Number of patients for test set (~10k images)
-            val_patients: Number of patients for val set (~15k images)
-        
-        Returns:
-            Tuple of (train_df, val_df, test_df)
+            test_ratio: Fraction of patients for test set
+            val_ratio: Fraction of patients for val set
         """
-        logger.info("Creating train/val/test splits...")
+        logger.info("Preparing interim splits for PadChest...")
+        
+        # Load and clean metadata
+        df = self.load_and_clean_metadata()
         
         # Get unique patients and shuffle
         patients = df["Patient ID"].unique()
@@ -289,14 +279,12 @@ class PadChestPreprocessor(BasePreprocessor):
         np.random.shuffle(patients)
         
         # Split patients
+        test_patients = int(len(patients) * test_ratio)
+        val_patients = int(len(patients) * val_ratio)
+
         test_patient_ids = patients[:test_patients]
-        remaining_patients = patients[test_patients:]
-        
-        # Shuffle remaining for val/train split
-        np.random.seed(seed)
-        np.random.shuffle(remaining_patients)
-        val_patient_ids = remaining_patients[:val_patients]
-        train_patient_ids = remaining_patients[val_patients:]
+        val_patient_ids = patients[test_patients:test_patients + val_patients]
+        train_patient_ids = patients[test_patients + val_patients:]
         
         # Create splits
         test_df = df[df["Patient ID"].isin(test_patient_ids)].copy()
@@ -305,14 +293,73 @@ class PadChestPreprocessor(BasePreprocessor):
         
         logger.info(f"Split sizes: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
         
-        return train_df, val_df, test_df
+        # Save interim CSVs
+        train_path = self.interim_dir / "padchest_train.csv"
+        val_path = self.interim_dir / "padchest_val.csv"
+        test_path = self.interim_dir / "padchest_test.csv"
+
+        train_df.to_csv(train_path, index=False)
+        val_df.to_csv(val_path, index=False)
+        test_df.to_csv(test_path, index=False)
+
+        return True
     
-    def run(self, seed: int = 42) -> dict:
+    def process_images(self):
         """
-        Run the full preprocessing pipeline.
+        Preprocess all images in the dataset.
+        """
+        logger.info("=" * 40)
+        logger.info("STAGE 2: Processing Images")
+        logger.info("=" * 40)
+
+        splits = list(self.interim_dir.glob("padchest_*.csv"))
+        if not splits:
+            logger.error("No interim split CSVs for PadChest found. Please run prepare_splits() first.")
+            return {}
+        
+        results = {}
+        
+        output_subdir = self.images_dir / self.DATASET_NAME
+        output_subdir.mkdir(parents=True, exist_ok=True)
+        
+        for split_path in splits:
+            split_name = split_path.stem
+            logger.info(f"Processing split: {split_name}")
+            
+            df = pd.read_csv(split_path)
+            valid_indices = []
+        
+            for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing images"):
+                source_path = self.images_source_dir / row["Path"]
+                output_path = self.images_dir / self.DATASET_NAME / row["Path"]
+            
+                if preprocess_chest_xray(
+                    image_path=source_path,
+                    output_path=output_path,
+                    size=self.image_size,
+                    crop_percent=self.crop_percent,
+                    clip_limit=self.clip_limit,
+                    tile_grid_size=self.tile_grid_size,
+                ):
+                    valid_indices.append(idx)
+                else:
+                    logger.warning(f"Failed to process image: {source_path}")
+            
+            df_final = df.loc[valid_indices].copy()
+            df_final["Path"] = df_final["Path"].apply(lambda p: f"{self.DATASET_NAME}/{p}")
+        
+            self.save_csv(df_final, f"{split_name}.csv")
+            results[split_name] = f"{split_name}.csv"
+
+        return results
+    
+    def run(self, seed: int = 42, stage: str = "all") -> dict:
+        """
+        Run the preprocessing pipeline.
         
         Args:
             seed: Random seed for splits
+            stage: Stage to run ("prepare", "process", or "all")
         
         Returns:
             Dict with paths to output files
@@ -321,28 +368,14 @@ class PadChestPreprocessor(BasePreprocessor):
         logger.info("PadChest Preprocessing Pipeline")
         logger.info("=" * 60)
         
-        # Load and clean metadata
-        df = self.load_metadata()
-        
-        # Preprocess images
-        df = self.preprocess_images(df)
-        
-        # Create splits
-        train_df, val_df, test_df = self.create_splits(df, seed=seed)
-        
-        # Save CSVs
-        train_path = self.save_csv(train_df, f"{self.DATASET_NAME}_train.csv")
-        val_path = self.save_csv(val_df, f"{self.DATASET_NAME}_val.csv")
-        test_path = self.save_csv(test_df, f"{self.DATASET_NAME}_test.csv")
-        
-        # Save full processed dataset
-        full_path = self.save_csv(df, f"{self.DATASET_NAME}_processed.csv")
+        if stage in ("prepare", "all"):
+            success = self.prepare_splits(seed=seed)
+            if not success:
+                logger.error("Failed to prepare splits. Aborting.")
+                return {}
+        if stage in ("process", "all"):
+            return self.process_images()
         
         logger.info("PadChest preprocessing complete!")
-        
-        return {
-            "train": train_path,
-            "val": val_path,
-            "test": test_path,
-            "full": full_path,
-        }
+
+        return {}

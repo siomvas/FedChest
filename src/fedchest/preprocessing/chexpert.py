@@ -13,8 +13,9 @@ Dataset is split into two clients based on patient age (threshold: 63 years).
 """
 
 import logging
+import shutil
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -38,7 +39,6 @@ class CheXpertPreprocessor(BasePreprocessor):
     """
     
     DATASET_NAME = "chexpert"
-    AGE_THRESHOLD = 63  # Median age for split
     
     def __init__(
         self,
@@ -47,21 +47,23 @@ class CheXpertPreprocessor(BasePreprocessor):
         config_path: Optional[Path] = None,
     ):
         super().__init__(source_dir, output_dir, config_path)
-        
-        # Expected source files
+
         self.metadata_file = self.source_dir / "train.csv"
-        self.images_source_dir = self.source_dir / "CheXpert-v1.0" / "train"
+        self.images_source_dir = self.source_dir / "train"
+
+        self.interim_dir = self.output_dir / "interim_splits"
+        self.interim_dir.mkdir(parents=True, exist_ok=True)
     
-    def load_metadata(self) -> pd.DataFrame:
+    def load_and_clean_metadata(self) -> pd.DataFrame:
         """
-        Load and parse CheXpert metadata.
+        Load, clean labels, and filter common diseases.
         
         Returns:
-            DataFrame with standardized columns
+            DataFrame with Age and Patient ID.
         """
         logger.info(f"Loading CheXpert metadata from {self.metadata_file}")
         
-        # Load CSV
+        # Load CSV (with age)
         df = pd.read_csv(self.metadata_file)
         
         logger.info(f"Loaded {len(df)} rows")
@@ -84,12 +86,12 @@ class CheXpertPreprocessor(BasePreprocessor):
         if "Pleural Effusion" in df.columns:
             df.rename(columns={"Pleural Effusion": "Effusion"}, inplace=True)
         
+        # Drop uncommon disease columns
+        uncommon = ["Enlarged Cardiomediastinum", "Pleural Other", "Fracture"]
+        df.drop(columns=[c for c in uncommon if c in df.columns], inplace=True)
+
         # Filter to common diseases
         df = self.filter_common_diseases(df)
-        
-        # Drop uncommon disease columns
-        uncommon = ["Lung Opacity", "Enlarged Cardiomediastinum", "Pleural Other", "Fracture"]
-        df.drop(columns=[c for c in uncommon if c in df.columns], inplace=True)
         
         # Extract patient ID from path
         # Path format: patient00001/study1/view1_frontal.jpg
@@ -105,6 +107,14 @@ class CheXpertPreprocessor(BasePreprocessor):
         
         # Standardize column names
         df = self.standardize_columns(df)
+
+        # Ensure Age is present (might have been dropped by standardize if not in config)
+        if "Age" not in df.columns:
+            # Re-merge Age from original if lost
+            df_age = pd.read_csv(self.metadata_file, usecols=["Path", "Age"])
+            df_age["Path"] = df_age["Path"].str.replace("CheXpert-v1.0/train/", "", regex=False)
+            df_age["Path"] = df_age["Path"].str.replace("/", "_")
+            df = df.merge(df_age[["Path", "Age"]], on="Path", how="inner")
         
         # Validate
         self.validate_labels(df)
@@ -115,202 +125,161 @@ class CheXpertPreprocessor(BasePreprocessor):
         
         return df
     
-    def load_with_age(self) -> pd.DataFrame:
+    def prepare_splits(self, seed: int = 42, test_ratio: float=0.1, val_ratio: float=0.15):
         """
-        Load metadata including age column for splitting.
-        
-        Returns:
-            DataFrame with Age column preserved
-        """
-        logger.info(f"Loading CheXpert metadata with age from {self.metadata_file}")
-        
-        # Load with Age column
-        df_original = pd.read_csv(self.metadata_file, usecols=["Path", "Age"])
-        df_original["Path"] = df_original["Path"].str.replace("CheXpert-v1.0/train/", "")
-        df_original["Path"] = df_original["Path"].str.replace("/", "_")
-        
-        # Get processed metadata
-        df = self.load_metadata()
-        
-        # Merge age back in
-        df = df.merge(df_original, on="Path", how="left")
-        
-        return df
-    
-    def get_source_image_path(self, row: pd.Series) -> Path:
-        """Get path to source image for a row."""
-        # Convert simplified path back to original structure
-        path_parts = row["Path"].replace(".jpg", "").split("_")
-        patient = path_parts[0]
-        study = path_parts[1]
-        view = "_".join(path_parts[2:]) + ".jpg"
-        
-        return self.images_source_dir / patient / study / view
-    
-    def get_output_image_path(self, row: pd.Series, client: str) -> Path:
-        """Get path for processed output image."""
-        return self.images_dir / client / row["Path"]
-    
-    def preprocess_images(
-        self,
-        df: pd.DataFrame,
-        client: str,
-    ) -> pd.DataFrame:
-        """
-        Preprocess all images for a specific client.
+        Prepare interim splits without image processing.
         
         Args:
-            df: DataFrame with Path column
-            client: Client name (cxp_young or cxp_old)
-        
-        Returns:
-            DataFrame with updated paths (failed images removed)
+            seed: Random seed for reproducibility
+            test_ratio: Proportion of data for test set
+            val_ratio: Proportion of data for validation set
         """
-        logger.info(f"Preprocessing {len(df)} images for {client}...")
-        
-        # Create output subdirectory
-        output_subdir = self.images_dir / client
-        output_subdir.mkdir(parents=True, exist_ok=True)
-        
-        failed_indices = []
-        
-        for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Processing {client}"):
-            source_path = self.get_source_image_path(row)
-            output_path = self.get_output_image_path(row, client)
-            
-            success = preprocess_chest_xray(
-                image_path=source_path,
-                output_path=output_path,
-                size=self.image_size,
-                crop_percent=self.crop_percent,
-                clip_limit=self.clip_limit,
-                tile_grid_size=self.tile_grid_size,
-            )
-            
-            if not success:
-                failed_indices.append(idx)
-        
-        # Remove failed images
-        if failed_indices:
-            logger.warning(f"Failed to process {len(failed_indices)} images")
-            df = df.drop(index=failed_indices)
-        
-        # Update paths to be relative
-        df["Path"] = df["Path"].apply(lambda p: f"{client}/{p}")
-        
-        logger.info(f"Successfully processed {len(df)} images for {client}")
-        return df
-    
-    def split_by_age(
-        self,
-        df: pd.DataFrame,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Split dataset by patient age.
-        
-        Patients with images spanning the age threshold are assigned
-        to the young group to maintain patient-level separation.
-        
-        Args:
-            df: DataFrame with Age column
-        
-        Returns:
-            Tuple of (young_df, old_df)
-        """
-        logger.info(f"Splitting by age (threshold: {self.AGE_THRESHOLD})...")
-        
-        # Initial split by age
-        young_df = df[df["Age"] < self.AGE_THRESHOLD].copy()
-        old_df = df[df["Age"] >= self.AGE_THRESHOLD].copy()
-        
-        # Find patients that appear in both groups
+        logger.info("=" * 40)
+        logger.info("STAGE 1: Preparing Splits (Metadata Only)")
+        logger.info("=" * 40)
+
+        df = self.load_and_clean_metadata()
+
+        median_age = df["Age"].median()
+        logger.info(f"Median age in dataset: {median_age}")
+
+        patients = df["Patient ID"].unique()
+        np.random.seed(seed)
+        np.random.shuffle(patients)
+
+        test_size = int(len(patients) * test_ratio)
+        test_patients = patients[:test_size]
+        train_val_patients = patients[test_size:]
+        df_test = df[df["Patient ID"].isin(test_patients)].copy()
+        df_train_val = df[df["Patient ID"].isin(train_val_patients)].copy()
+
+        logger.info(f"Global Split: Test Patients={len(test_patients)}, Train/Val Patients={len(train_val_patients)}")
+
+        # Split by age
+        # Patients straddling the boundary go to Young to prevent leakage
+        young_df = df_train_val[df_train_val["Age"] < median_age].copy()
+        old_df = df_train_val[df_train_val["Age"] >= median_age].copy()
         young_patients = set(young_df["Patient ID"])
         old_patients = set(old_df["Patient ID"])
         common_patients = young_patients & old_patients
-        
         if common_patients:
             logger.info(f"Found {len(common_patients)} patients spanning age threshold")
-            
-            # Move all images from common patients to young group
             common_old_images = old_df[old_df["Patient ID"].isin(common_patients)]
             young_df = pd.concat([young_df, common_old_images], ignore_index=True)
             old_df = old_df[~old_df["Patient ID"].isin(common_patients)]
-            
             logger.info(f"Moved {len(common_old_images)} images to young group")
         
-        # Verify no overlap
-        assert len(set(young_df["Patient ID"]) & set(old_df["Patient ID"])) == 0
+        young_test = df_test[df_test["Age"] < median_age].copy()
+        old_test = df_test[df_test["Age"] >= median_age].copy()
+
+        def create_client_split(client_df, client_name):
+            patients = client_df["Patient ID"].unique()
+            np.random.seed(seed)
+            np.random.shuffle(patients)
+            val_size = int(len(patients) * val_ratio)
+
+            val_patients = patients[:val_size]
+            train_patients = patients[val_size:]
+
+            val_df = client_df[client_df["Patient ID"].isin(val_patients)].copy()
+            train_df = client_df[client_df["Patient ID"].isin(train_patients)].copy()
+
+            logger.info(f"{client_name} Split: Train Patients={len(train_patients)}, Val Patients={len(val_patients)}")
+            
+            return train_df, val_df
         
-        logger.info(f"Split result: young={len(young_df)}, old={len(old_df)}")
+        young_train, young_val = create_client_split(young_df, "cxp_young")
+        old_train, old_val = create_client_split(old_df, "cxp_old")
+
+        # Save interim CSVs
+        splits = {
+            "cxp_young_train": young_train,
+            "cxp_young_val": young_val,
+            "cxp_young_test": young_test,
+            "cxp_old_train": old_train,
+            "cxp_old_val": old_val,
+            "cxp_old_test": old_test,
+        }
+
+        for split_name, split_df in splits.items():
+            split_file = self.interim_dir / f"{split_name}.csv"
+            split_df.to_csv(split_file, index=False)
+            logger.info(f"Saved {split_name} with {len(split_df)} rows to {split_file}")
         
-        return young_df, old_df
+        return True
     
-    def create_test_split(
-        self,
-        df: pd.DataFrame,
-        seed: int = 42,
-        test_patients: int = 7356,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def process_images(self):
         """
-        Create test split from full dataset (before age split).
+        Process all images.
+        """
+        logger.info("=" * 40)
+        logger.info("STAGE 2: Processing Images")
+        logger.info("=" * 40)
+
+        splits = list(self.interim_dir.glob("cxp*.csv"))
+        if not splits:
+            logger.error("No interim split CSVs found. Please run prepare_splits() first.")
+            return {}
+        
+        results = {}
+
+        for split_file in splits:
+            split_name = split_file.stem
+            client = "cxp_young" if "young" in split_name else "cxp_old"
+            logger.info(f"\n--- Processing {split_name} for {client} ---")
+            df = pd.read_csv(split_file)
+
+            # create output subdirectory
+            client_output_dir = self.images_dir / client
+            client_output_dir.mkdir(parents=True, exist_ok=True)
+
+            valid_indices = []
+        
+            for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Processing {client}"):
+                # Reconstruct source path
+                # Path in CSV is "patient001_study1_view1.jpg"
+                # Actual source is "train/patient001/study1/view1.jpg"
+                parts = row["Path"].split("_")
+                patient, study = parts[0], parts[1]
+                filename = "_".join(parts[2:])
+                
+                source_path = self.images_source_dir / patient / study / filename
+                output_path = client_output_dir / row["Path"]
+            
+                if preprocess_chest_xray(
+                    image_path=source_path,
+                    output_path=output_path,
+                    size=self.image_size,
+                    crop_percent=self.crop_percent,
+                    clip_limit=self.clip_limit,
+                    tile_grid_size=self.tile_grid_size,
+                ):
+                    valid_indices.append(idx)
+        
+            # Remove failed images
+            df_final = df.loc[valid_indices].copy()
+        
+            # Update paths to be relative
+            df_final["Path"] = df_final["Path"].apply(lambda p: f"{client}/{p}")
+
+            if "Age" in df_final.columns:
+                df_final.drop(columns=["Age"], inplace=True)
+            
+            final_csv_name = f"{split_name}.csv"
+            self.save_csv(df_final, final_csv_name)
+            results[split_name] = final_csv_name
+        
+        # shutil.rmtree(self.interim_dir)
+        
+        return results
+    
+    def run(self, seed: int = 42, stage: str = "all") -> dict:
+        """
+        Run the preprocessing pipeline.
         
         Args:
-            df: Full dataset with Age column
-            seed: Random seed
-            test_patients: Number of patients for test set
-        
-        Returns:
-            Tuple of (train_val_df, test_df)
-        """
-        logger.info("Creating test split...")
-        
-        patients = df["Patient ID"].unique()
-        np.random.seed(seed)
-        np.random.shuffle(patients)
-        
-        test_patient_ids = patients[:test_patients]
-        
-        test_df = df[df["Patient ID"].isin(test_patient_ids)].copy()
-        train_val_df = df[~df["Patient ID"].isin(test_patient_ids)].copy()
-        
-        logger.info(f"Test split: train_val={len(train_val_df)}, test={len(test_df)}")
-        
-        return train_val_df, test_df
-    
-    def create_val_split(
-        self,
-        df: pd.DataFrame,
-        seed: int = 42,
-        val_patients: int = 7489,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Create validation split from a subset.
-        
-        Args:
-            df: Dataset subset (young or old)
-            seed: Random seed
-            val_patients: Number of patients for validation
-        
-        Returns:
-            Tuple of (train_df, val_df)
-        """
-        patients = df["Patient ID"].unique()
-        np.random.seed(seed)
-        np.random.shuffle(patients)
-        
-        val_patient_ids = patients[:val_patients]
-        
-        val_df = df[df["Patient ID"].isin(val_patient_ids)].copy()
-        train_df = df[~df["Patient ID"].isin(val_patient_ids)].copy()
-        
-        return train_df, val_df
-    
-    def run(self, seed: int = 42) -> dict:
-        """
-        Run the full preprocessing pipeline.
-        
-        Args:
-            seed: Random seed for splits (standardized to 42, was 44)
+            seed: Random seed for splits
+            stage: Stage to run ("prepare", "process", or "all")
         
         Returns:
             Dict with paths to output files for both clients
@@ -319,57 +288,13 @@ class CheXpertPreprocessor(BasePreprocessor):
         logger.info("CheXpert Preprocessing Pipeline")
         logger.info("=" * 60)
         
-        # Load metadata with age
-        df = self.load_with_age()
-        
-        # Create test split first (before age split)
-        train_val_df, test_df = self.create_test_split(df, seed=seed)
-        
-        # Split train_val by age
-        young_train_val, old_train_val = self.split_by_age(train_val_df)
-        
-        # Split test by age (same threshold)
-        young_test, old_test = self.split_by_age(test_df)
-        
-        # Create train/val splits for each age group
-        # Young: ~7489 patients for val
-        young_train, young_val = self.create_val_split(young_train_val, seed=seed, val_patients=7489)
-        # Old: ~7264 patients for val
-        old_train, old_val = self.create_val_split(old_train_val, seed=seed, val_patients=7264)
-        
-        # Preprocess images for each client
-        logger.info("\n--- Processing cxp_young ---")
-        young_train = self.preprocess_images(young_train, "cxp_young")
-        young_val = self.preprocess_images(young_val, "cxp_young")
-        young_test = self.preprocess_images(young_test, "cxp_young")
-        
-        logger.info("\n--- Processing cxp_old ---")
-        old_train = self.preprocess_images(old_train, "cxp_old")
-        old_val = self.preprocess_images(old_val, "cxp_old")
-        old_test = self.preprocess_images(old_test, "cxp_old")
-        
-        # Drop Age column before saving
-        for df_split in [young_train, young_val, young_test, old_train, old_val, old_test]:
-            if "Age" in df_split.columns:
-                df_split.drop(columns=["Age"], inplace=True)
-        
-        # Save CSVs
-        results = {}
-        
-        # Young client
-        results["cxp_young"] = {
-            "train": self.save_csv(young_train, "cxp_young_train.csv"),
-            "val": self.save_csv(young_val, "cxp_young_val.csv"),
-            "test": self.save_csv(young_test, "cxp_young_test.csv"),
-        }
-        
-        # Old client
-        results["cxp_old"] = {
-            "train": self.save_csv(old_train, "cxp_old_train.csv"),
-            "val": self.save_csv(old_val, "cxp_old_val.csv"),
-            "test": self.save_csv(old_test, "cxp_old_test.csv"),
-        }
+        if stage in ["prepare", "all"]:
+            success = self.prepare_splits(seed=seed)
+            if not success:
+                logger.error("Failed to prepare splits.")
+                return {}
+        if stage in ["process", "all"]:
+            return self.process_images()
         
         logger.info("CheXpert preprocessing complete!")
-        
-        return results
+        return {}

@@ -17,7 +17,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-with open(Path(__file__).parent.parent.parent / "configs" / "preprocessing.yaml", "r") as f:
+with open(Path(__file__).parent.parent.parent.parent / "configs" / "preprocessing.yaml", "r") as f:
     PREPROCESSING_CONFIGS = yaml.safe_load(f)
 CLASS_NAMES = PREPROCESSING_CONFIGS["common_diseases"]
 

@@ -1,6 +1,6 @@
 """FedChest preprocessing utilities."""
 
-from fedchest.preprocessing.base import BasePreprocessor, COMMON_DISEASES
+from fedchest.preprocessing.base import BasePreprocessor
 from fedchest.preprocessing.image_transforms import (
     apply_clahe,
     crop_borders,
@@ -15,7 +15,6 @@ from fedchest.preprocessing.padchest import PadChestPreprocessor
 
 __all__ = [
     "BasePreprocessor",
-    "COMMON_DISEASES",
     "CXR14Preprocessor",
     "CheXpertPreprocessor",
     "PadChestPreprocessor",

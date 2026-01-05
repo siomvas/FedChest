@@ -1,69 +1,47 @@
 #!/usr/bin/env python3
 """
-Script 01: Download source datasets.
+Script 01: Download and Verify Source Datasets.
 
-This script provides instructions and utilities for downloading the source
-datasets required to build FedChest.
+This script checks for the presence of the three required source datasets.
+Since these datasets can be large and stored in different locations on an HPC 
+or local machine, this script allows you to specify the path to each dataset 
+individually.
 
 NOTE: All three datasets require registration/approval before download.
-This script cannot automatically download them.
 
-Required datasets:
+Required datasets and expected structures:
+
 1. NIH ChestX-ray14 (CXR14)
-   - URL: https://nihcc.app.box.com/v/ChestXray-NIHCC
-   - Size: ~45 GB
-   - Files needed:
-     - images/ (all PNG files)
+   - Argument: --cxr14-dir /path/to/cxr14
+   - Expected contents inside directory:
+     - images/ (folder containing PNGs)
      - Data_Entry_2017_v2020.csv
-     - train_val_list.txt
-     - test_list.txt
 
 2. CheXpert
-   - URL: https://stanfordmlgroup.github.io/competitions/chexpert/
-   - Size: ~11 GB (small version) or ~439 GB (full)
-   - Requires Stanford AIMI registration
-   - Files needed:
-     - CheXpert-v1.0/train/ (all images)
+   - Argument: --chexpert-dir /path/to/CheXpert-v1.0
+   - Expected contents inside directory:
+     - train/ (folder containing patient subfolders)
      - train.csv
 
 3. PadChest
-   - URL: https://bimcv.cipf.es/bimcv-projects/padchest/
-   - Size: ~1 TB (full) or subset
-   - Requires BIMCV registration
-   - Files needed:
-     - images/ (PNG files)
+   - Argument: --padchest-dir /path/to/padchest
+   - Expected contents inside directory:
+     - images/ (folder containing PNGs)
      - PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv
 
 Usage:
-    python scripts/01_download_sources.py --check --data-dir /path/to/data
-
-After downloading, your directory structure should look like:
-
-    /path/to/data/
-    ├── cxr14/
-    │   ├── images/
-    │   │   ├── 00000001_000.png
-    │   │   └── ...
-    │   ├── Data_Entry_2017_v2020.csv
-    │   ├── train_val_list.txt
-    │   └── test_list.txt
-    ├── chexpert/
-    │   ├── CheXpert-v1.0/
-    │   │   └── train/
-    │   │       ├── patient00001/
-    │   │       └── ...
-    │   └── train.csv
-    └── padchest/
-        ├── images/
-        │   ├── 216840111366964012373310883942009152114636712_00-102-146.png
-        │   └── ...
-        └── PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv
+    python scripts/01_download_sources.py \
+        --check \
+        --cxr14-dir /data/public/cxr14 \
+        --chexpert-dir /path/to/archive/CheXpert-v1.0 \
+        --padchest-dir /scratch/datasets/padchest
 """
 
 import argparse
 import logging
+import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,21 +50,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Expected files for each dataset
+# Expected files relative to the specific dataset directory provided by the user
 EXPECTED_FILES: Dict[str, List[Tuple[str, bool]]] = {
     "cxr14": [
         ("Data_Entry_2017_v2020.csv", True),
-        ("train_val_list.txt", False),  # Optional, can reconstruct
-        ("test_list.txt", False),
-        ("images", True),  # Directory
+        ("train_val_list.txt", False),  # Optional
+        ("test_list.txt", False),       # Optional
+        ("images", True),               # Directory
     ],
     "chexpert": [
         ("train.csv", True),
-        ("CheXpert-v1.0/train", True),  # Directory
+        ("train", True),                # Directory (contains patient folders)
+        ("valid.csv", False),           # Optional
+        ("valid", False),               # Optional
     ],
     "padchest": [
         ("PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv", True),
-        ("images", True),  # Directory
+        ("images", True),               # Directory
     ],
 }
 
@@ -98,32 +78,31 @@ ALTERNATIVE_FILES: Dict[str, Dict[str, str]] = {
 }
 
 
-def check_dataset(data_dir: Path, dataset_name: str) -> Tuple[bool, List[str]]:
+def check_dataset(dataset_path: Path, dataset_name: str) -> Tuple[bool, List[str]]:
     """
-    Check if a dataset is properly downloaded.
+    Check if a specific dataset is valid at the given path.
     
     Args:
-        data_dir: Root data directory
-        dataset_name: Name of dataset (cxr14, chexpert, padchest)
+        dataset_path: Path to the specific dataset root
+        dataset_name: Name of dataset (cxr14, chexpert, padchest) for looking up rules
     
     Returns:
         Tuple of (all_required_present, list_of_missing_files)
     """
-    dataset_dir = data_dir / dataset_name
     missing = []
     
-    if not dataset_dir.exists():
-        return False, [f"{dataset_name}/ directory not found"]
+    if not dataset_path.exists():
+        return False, [f"Directory not found: {dataset_path}"]
     
     expected = EXPECTED_FILES.get(dataset_name, [])
     alternatives = ALTERNATIVE_FILES.get(dataset_name, {})
     
     for filename, required in expected:
-        filepath = dataset_dir / filename
+        filepath = dataset_path / filename
         
         # Check for alternative filenames
         alt_filename = alternatives.get(filename)
-        alt_filepath = dataset_dir / alt_filename if alt_filename else None
+        alt_filepath = dataset_path / alt_filename if alt_filename else None
         
         exists = filepath.exists() or (alt_filepath and alt_filepath.exists())
         
@@ -131,25 +110,6 @@ def check_dataset(data_dir: Path, dataset_name: str) -> Tuple[bool, List[str]]:
             missing.append(filename)
     
     return len(missing) == 0, missing
-
-
-def check_all_datasets(data_dir: Path) -> Dict[str, Tuple[bool, List[str]]]:
-    """
-    Check all required datasets.
-    
-    Args:
-        data_dir: Root data directory
-    
-    Returns:
-        Dict mapping dataset name to (ready, missing_files)
-    """
-    results = {}
-    
-    for dataset_name in EXPECTED_FILES.keys():
-        ready, missing = check_dataset(data_dir, dataset_name)
-        results[dataset_name] = (ready, missing)
-    
-    return results
 
 
 def print_download_instructions():
@@ -160,109 +120,113 @@ def print_download_instructions():
 ║                     FedChest Dataset Download Instructions                   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
-All three datasets require registration before download. Please follow the
-instructions below for each dataset.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 1. NIH ChestX-ray14 (CXR14)
-   ─────────────────────────
    URL: https://nihcc.app.box.com/v/ChestXray-NIHCC
-   
-   Steps:
-   a) Create a Box account (if you don't have one)
-   b) Download all files from the images/ folder
-   c) Download Data_Entry_2017_v2020.csv
-   d) Download train_val_list.txt and test_list.txt
-   
-   Place files in: <data_dir>/cxr14/
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Required: images/ folder and Data_Entry_2017_v2020.csv
 
 2. CheXpert
-   ─────────
    URL: https://stanfordmlgroup.github.io/competitions/chexpert/
-   
-   Steps:
-   a) Register at Stanford AIMI: https://aimi.stanford.edu/chexpert-chest-x-rays
-   b) Accept the data use agreement
-   c) Download CheXpert-v1.0-small.zip (or full version)
-   d) Extract the archive
-   
-   Place files in: <data_dir>/chexpert/
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Required: CheXpert-v1.0-small.zip (or full). Unzip it.
+   Point the script to the unzipped folder (containing train/ and train.csv).
 
 3. PadChest
-   ─────────
    URL: https://bimcv.cipf.es/bimcv-projects/padchest/
-   
-   Steps:
-   a) Register at BIMCV
-   b) Request access to the PadChest dataset
-   c) Download images and labels CSV
-   
-   Place files in: <data_dir>/padchest/
+   Required: images/ folder and labels CSV.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-After downloading, run this script with --check to verify:
-
-    python scripts/01_download_sources.py --check --data-dir /path/to/data
-
+Verify your paths using the --check flag with specific directory arguments.
 """
     print(instructions)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download and verify source datasets for FedChest",
+        description="Verify source datasets for FedChest",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    
+    # Arguments for each specific dataset path
+    parser.add_argument(
+        "--cxr14-dir",
+        type=Path,
+        help="Path to the NIH ChestX-ray14 dataset root",
+    )
+    parser.add_argument(
+        "--chexpert-dir",
+        type=Path,
+        help="Path to the CheXpert dataset root (e.g., .../CheXpert-v1.0)",
+    )
+    parser.add_argument(
+        "--padchest-dir",
+        type=Path,
+        help="Path to the PadChest dataset root",
+    )
+
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Check if datasets are properly downloaded",
-    )
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=Path("./data/raw"),
-        help="Root directory for raw datasets",
+        help="Check if datasets are properly downloaded at the specified paths",
     )
     parser.add_argument(
         "--instructions",
         action="store_true",
         help="Print download instructions",
     )
+    
     args = parser.parse_args()
     
-    if args.instructions or not args.check:
+    # If no arguments provided, just show help
+    if len(sys.argv) == 1:
+        parser.print_help()
+        return 0
+
+    if args.instructions:
         print_download_instructions()
+        return 0
     
     if args.check:
-        logger.info(f"Checking datasets in: {args.data_dir}")
+        logger.info("Checking provided dataset paths...")
         logger.info("=" * 60)
         
-        results = check_all_datasets(args.data_dir)
-        all_ready = True
+        # Map the cli args to the internal names
+        # We only check datasets that the user explicitly provided paths for
+        datasets_to_check = {
+            "cxr14": args.cxr14_dir,
+            "chexpert": args.chexpert_dir,
+            "padchest": args.padchest_dir
+        }
         
-        for dataset_name, (ready, missing) in results.items():
+        all_passed = True
+        checked_any = False
+
+        for name, path in datasets_to_check.items():
+            if path is None:
+                # User did not provide this path
+                logger.warning(f"{name}: Path not provided (skipping check)")
+                continue
+            
+            checked_any = True
+            ready, missing = check_dataset(path, name)
             status = "✓ Ready" if ready else "✗ Missing files"
-            logger.info(f"{dataset_name}: {status}")
+            
+            # Print status with the path for clarity
+            logger.info(f"{name} ({path}): {status}")
             
             if missing:
+                all_passed = False
                 for filename in missing:
                     logger.info(f"  - Missing: {filename}")
-                all_ready = False
         
         logger.info("=" * 60)
         
-        if all_ready:
-            logger.info("✓ All datasets are ready for preprocessing!")
-            logger.info("Run: python scripts/02_preprocess_all.py --data-dir " + str(args.data_dir))
+        if not checked_any:
+            logger.error("No dataset paths provided to check! Please use --cxr14-dir, --chexpert-dir, or --padchest-dir.")
+            return 1
+
+        if all_passed:
+            logger.info("✓ All checked datasets are valid.")
+            logger.info("You can now proceed to preprocessing using these specific paths.")
         else:
-            logger.warning("Some datasets are missing. See download instructions above.")
+            logger.warning("Some datasets are missing required files.")
             return 1
     
     return 0
