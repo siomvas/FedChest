@@ -44,7 +44,7 @@ padchest:
     Effusion:
       - pleural effusion
       - loculated fissural effusion
-      - pericardial effusion
+      # - pericardial effusion
       - loculated pleural effusion
       - hydropneumothorax
       - empyema
@@ -72,6 +72,5 @@ padchest:
     Pneumothorax:
       - pneumothorax
       - hydropneumothorax
-
     No Finding:
       - normal
