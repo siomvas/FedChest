@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.8"
 authors = [
-    {name = "Vasilis Siomos", email = "user@example.org"},
+    {name = "Vasilis Siomos"},
 ]
 keywords = [
     "federated-learning",
@@ -71,10 +71,6 @@ Homepage = "https://github.com/siomvas/FedChest"
 Documentation = "https://github.com/siomvas/FedChest#readme"
 Repository = "https://github.com/siomvas/FedChest"
 Issues = "https://github.com/siomvas/FedChest/issues"
-
-[project.scripts]
-fedchest-preprocess = "fedchest.scripts.preprocess:main"
-fedchest-validate = "fedchest.scripts.validate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
